@@ -1,7 +1,12 @@
 import { BN } from "ethereumjs-util";
 import * as t from "io-ts";
 
-import { MethodNotFoundError, MethodNotSupportedError } from "../errors";
+import {
+  MethodNotFoundError,
+  MethodNotSupportedError,
+  InvalidInputError
+} from "../errors";
+
 import { rpcQuantity, validateParams } from "../input";
 import { BuidlerNode } from "../node";
 import { numberToRpcQuantity } from "../output";
@@ -19,6 +24,9 @@ export class EvmModule {
       case "evm_increaseTime":
         return this._increaseTimeAction(...this._increaseTimeParams(params));
 
+      case "evm_setNextBlockTimestamp":
+        return this._setNextBlockTimestampAction(...this._setNextBlockTimestampParams(params));
+
       case "evm_mine":
         return this._mineAction(...this._mineParams(params));
 
@@ -30,6 +38,22 @@ export class EvmModule {
     }
 
     throw new MethodNotFoundError(`Method ${method} not found`);
+  }
+
+  // evm_setNextBlockTimestamp
+
+  private _setNextBlockTimestampParams(params: any[]): [number] {
+    return validateParams(params, t.number);
+  }
+
+  private async _setNextBlockTimestampAction(timestamp: number): Promise<string> {
+    const latestBlock = await this._node.getLatestBlock();
+    const increment = new BN(timestamp).sub(new BN(latestBlock.header.timestamp));
+    if (increment.lte(new BN(0))) {
+      throw new InvalidInputError(`Timestamp ${timestamp} is lower than previous block's timestamp ${new BN(latestBlock.header.timestamp).toNumber()}`);
+    }
+    await this._node.setNextBlockTimestamp(new BN(timestamp));
+    return timestamp.toString();
   }
 
   // evm_increaseTime
@@ -47,24 +71,33 @@ export class EvmModule {
 
   // evm_mine
 
-  private _mineParams(params: any[]): [] {
-    if (params.length == 1) {
-      return validateParams(params, t.number);
-    } else {
-      return validateParams(params);
+  private _mineParams(params: any[]): [number] {
+    if (params.length == 0) {
+      params.push(0);
     }
+    return validateParams(params, t.number);
   }
 
-  private async _mineAction(timestamp?: BN): Promise<string> {
-    if (timestamp !== undefined) {
-      const latestBlock = await this._node.getLatestBlock();
-      const increment = new BN(timestamp).sub(new BN(latestBlock.header.timestamp));
-      if (increment.lte(new BN(0))) {
-        throw new InvalidInputError(`Timestamp ${timestamp} is lower than previous block's timestamp`);
-      }
-      await this._node.increaseTime(increment);
+  private async _advanceTimeOffsetAccordingToTimestamp(timestamp: BN) {
+    const latestBlock = await this._node.getLatestBlock();
+    const increment = new BN(timestamp).sub(new BN(latestBlock.header.timestamp));
+    if (increment.lte(new BN(0))) {
+      throw new InvalidInputError(`Timestamp ${timestamp} is lower than previous block's timestamp`);
     }
-    await this._node.mineEmptyBlock(timestamp);
+    await this._node.increaseTime(increment);
+  }
+
+  private async _mineAction(timestamp: number): Promise<string> {
+    if (timestamp !== 0) {
+      await this._advanceTimeOffsetAccordingToTimestamp(new BN(timestamp));
+    } else {
+      const nextBlockTimestamp = await this._node.getNextBlockTimestamp();
+      if (!nextBlockTimestamp.eq(new BN(0))) {
+        timestamp = nextBlockTimestamp.toNumber();
+        await this._advanceTimeOffsetAccordingToTimestamp(new BN(timestamp));
+      }
+    }
+    await this._node.mineEmptyBlock(new BN(timestamp));
     return numberToRpcQuantity(0);
   }
 
